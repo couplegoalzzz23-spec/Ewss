@@ -4,4 +4,3 @@ pandas
 requests
 pillow
 matplotlib
-opencv-python-headless
