@@ -8,80 +8,84 @@ import matplotlib.pyplot as plt
 # =========================
 # ⚙️ CONFIG
 # =========================
-st.set_page_config(page_title="Cb Detection IR Himawari", layout="wide")
+st.set_page_config(page_title="CB Detection IR (Scientific Prototype)", layout="wide")
 
-st.title("🌩️ Automatic Cumulonimbus Detection (Himawari IR)")
-st.caption("Prototype berbasis citra satelit IR BMKG - pixel-based convective detection")
+st.title("🌩️ Cumulonimbus Detection from Himawari IR")
+st.caption("Scientific prototype based on cloud-top temperature proxy (NO RANDOM DATA)")
 
 # =========================
-# 🛰️ LOAD IMAGE BMKG IR
+# 🛰️ LOAD IMAGE BMKG
 # =========================
 @st.cache_data
-def load_ir():
+def load_image():
     url = "https://inderaja.bmkg.go.id/IMAGE/HIMA/H08_IR/INA/thumbnail_AHI88_IR1.png"
     
     try:
         r = requests.get(url, timeout=10)
         img = Image.open(BytesIO(r.content)).convert("L")
-        return np.array(img), None
+        arr = np.array(img)
+
+        # validasi sederhana
+        if np.mean(arr) == 0:
+            return None, "Empty image"
+
+        return arr, None
+
     except Exception as e:
         return None, str(e)
 
-img, error = load_ir()
+img, error = load_image()
 
-# fallback kalau gagal
+# =========================
+# ❗ STOP jika data tidak valid
+# =========================
 if error or img is None:
-    st.warning("⚠️ Gagal ambil data BMKG, menggunakan data simulasi.")
-    img = np.random.randint(0, 255, (500, 500))
+    st.error("❌ Data satelit tidak tersedia atau tidak valid.")
+    st.stop()
 
 # =========================
-# 🌡️ PIXEL → TEMPERATURE PROXY
+# 🌡️ PROXY CLOUD TOP TEMPERATURE
 # =========================
-def pixel_to_temp(pixel):
-    # proxy IR brightness → suhu (approximation)
+def pixel_to_ctt(pixel):
+    # proxy saja (tidak diklaim real calibration)
     return -90 + (pixel / 255) * 100
 
-ctt = pixel_to_temp(img)
+ctt = pixel_to_ctt(img)
 
 # =========================
-# 🌩️ CB DETECTION ENGINE
+# 🌩️ CB DETECTION (ROBUST SCIENTIFIC METHOD)
 # =========================
-def detect_cb(ctt_array):
 
-    # cold cloud threshold (Cb candidate)
-    cb_mask = ctt_array < -70
+# threshold berbasis percentile (lebih stabil dari fixed -70)
+cold_threshold = np.percentile(ctt, 5)  # 5% terdingin dianggap cloud deep convection
 
-    # coverage (% area)
-    coverage = np.sum(cb_mask) / cb_mask.size
+cb_mask = ctt <= cold_threshold
 
-    # intensity (rata-rata suhu awan dingin)
-    if np.any(cb_mask):
-        intensity = np.mean(ctt_array[cb_mask])
-    else:
-        intensity = -999
+coverage = np.sum(cb_mask) / cb_mask.size
 
-    # scoring system
-    score = (coverage * 0.7)
+if np.any(cb_mask):
+    intensity = np.median(ctt[cb_mask])
+else:
+    intensity = None
 
-    if intensity != -999:
-        score += (abs(intensity + 70) / 70) * 0.3
+# scoring ilmiah sederhana
+score = coverage * 0.8
 
-    return cb_mask, coverage, intensity, score
-
-cb_mask, coverage, intensity, score = detect_cb(ctt)
+if intensity is not None:
+    score += (abs(intensity) / 100) * 0.2
 
 # =========================
 # 🚨 CLASSIFICATION
 # =========================
 def classify(score):
-    if score < 0.2:
-        return "🟢 Tidak signifikan"
-    elif score < 0.4:
-        return "🟡 CB mulai berkembang"
+    if score < 0.1:
+        return "🟢 Low convective activity"
+    elif score < 0.3:
+        return "🟡 Developing convection"
     elif score < 0.6:
-        return "🟠 CB aktif (hujan lebat)"
+        return "🟠 Active convection (CB possible)"
     else:
-        return "🔴 CB sangat aktif (cuaca ekstrem)"
+        return "🔴 Strong deep convection (CB likely)"
 
 status = classify(score)
 
@@ -91,54 +95,52 @@ status = classify(score)
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("🛰️ Citra IR BMKG")
+    st.subheader("🛰️ IR Satellite Image")
     st.image(img, use_container_width=True)
 
-    st.subheader("🌩️ Deteksi CB (mask)")
-    st.image(cb_mask.astype(np.uint8) * 255, use_container_width=True)
+    st.subheader("🌩️ Cold Cloud Mask (Deep Convection)")
+    st.image(cb_mask.astype(int) * 255, use_container_width=True)
 
 with col2:
-    st.subheader("📊 Hasil Analisis")
+    st.subheader("📊 Analysis Result")
 
-    st.metric("CB Coverage", f"{coverage*100:.2f}%")
-    st.metric("CB Score", f"{score:.2f}")
+    st.metric("Convective Coverage", f"{coverage*100:.2f}%")
+    st.metric("CB Score", f"{score:.3f}")
     st.metric("Status", status)
 
-    if intensity == -999:
-        st.warning("Tidak ada area CB terdeteksi")
-    else:
-        st.metric("CB Intensity (proxy °C)", f"{intensity:.2f}")
+    if intensity is not None:
+        st.metric("Median Cold Cloud Temp", f"{intensity:.2f} °C")
 
-    st.write("### 🧠 Interpretasi")
+    st.write("### 🧠 Interpretation")
     st.write("""
-    Sistem ini mendeteksi Cumulonimbus berdasarkan:
-    - Suhu puncak awan sangat dingin (< -70°C)
-    - Luas area awan dingin (coverage)
-    
-    Semakin besar coverage + semakin dingin awan → semakin tinggi potensi badai.
+    This system detects deep convective clouds (Cumulonimbus proxy)
+    using cold cloud-top temperature distribution from IR satellite imagery.
+
+    ⚠️ This is a scientific proxy model, not an operational BMKG product.
     """)
 
 # =========================
-# 📊 HISTOGRAM SUHU
+# 📊 HISTOGRAM
 # =========================
-st.subheader("📊 Distribusi Suhu Awan (Proxy CTT)")
+st.subheader("📊 Cloud Top Temperature Distribution")
 
 fig, ax = plt.subplots()
 ax.hist(ctt.flatten(), bins=30)
 ax.set_xlabel("Temperature (°C)")
 ax.set_ylabel("Pixel count")
-ax.set_title("Cloud Top Temperature Distribution")
+ax.set_title("IR Cloud Top Temperature Proxy Distribution")
 
 st.pyplot(fig)
 
 # =========================
-# 🔍 DETAIL NUMERIK
+# 📌 DEBUG INFO
 # =========================
-st.subheader("📍 Statistik Tambahan")
+st.subheader("📌 Diagnostics")
 
-st.write({
-    "mean_temp": float(np.mean(ctt)),
-    "min_temp": float(np.min(ctt)),
-    "max_temp": float(np.max(ctt)),
-    "cb_pixel_count": int(np.sum(cb_mask))
+st.json({
+    "mean_ctt": float(np.mean(ctt)),
+    "min_ctt": float(np.min(ctt)),
+    "max_ctt": float(np.max(ctt)),
+    "cold_threshold_percentile": 5,
+    "cb_pixel_fraction": float(coverage)
 })
