@@ -13,7 +13,7 @@ import json
 st.set_page_config(page_title="EWS Himawari", layout="wide")
 
 st.title("🌩️ Early Warning System - Himawari")
-st.markdown("Sistem deteksi dini cuaca ekstrem berbasis suhu awan (TBB)")
+st.markdown("Deteksi dini cuaca ekstrem berbasis suhu awan (TBB)")
 
 # =========================
 # PILIH MODE
@@ -21,7 +21,7 @@ st.markdown("Sistem deteksi dini cuaca ekstrem berbasis suhu awan (TBB)")
 mode = st.radio("📡 Pilih Sumber Data:", ["Dummy", "Himawari Real"])
 
 # =========================
-# LOAD DUMMY
+# DUMMY DATA (AMAN)
 # =========================
 def load_dummy():
     file_path = "riau_warning.geojson"
@@ -44,14 +44,13 @@ def load_dummy():
                 }
             ]
         }
-
         with open(file_path, "w") as f:
             json.dump(dummy, f)
 
     return gpd.read_file(file_path)
 
 # =========================
-# LOAD HIMAWARI REAL
+# HIMAWARI REAL (ANTI ERROR)
 # =========================
 def load_himawari():
     import requests
@@ -59,39 +58,54 @@ def load_himawari():
     import io
     from shapely.geometry import Polygon
 
-    url = "https://www.bmkg.go.id/asset/img/satelit/himawari-ir-enhanced.jpg"
+    try:
+        url = "https://www.bmkg.go.id/asset/img/satelit/himawari-ir-enhanced.jpg"
 
-    response = requests.get(url)
-    img = Image.open(io.BytesIO(response.content))
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
 
-    img = img.resize((100, 100))
-    arr = np.array(img)
+        # validasi response
+        if response.status_code != 200:
+            raise Exception("Status bukan 200")
 
-    # konversi ke suhu (approx)
-    tbb = (arr[:, :, 0] / 255.0) * (-30 - (-80)) + (-80)
+        if "image" not in response.headers.get("Content-Type", ""):
+            raise Exception("Bukan gambar")
 
-    lat = np.linspace(-10, 10, tbb.shape[0])
-    lon = np.linspace(95, 140, tbb.shape[1])
+        img = Image.open(io.BytesIO(response.content))
 
-    polygons = []
-    temps = []
+        # resize biar ringan
+        img = img.resize((100, 100))
+        arr = np.array(img)
 
-    for i in range(len(lat)-1):
-        for j in range(len(lon)-1):
-            poly = Polygon([
-                (lon[j], lat[i]),
-                (lon[j], lat[i+1]),
-                (lon[j+1], lat[i+1]),
-                (lon[j+1], lat[i])
-            ])
+        # konversi ke suhu (approx)
+        tbb = (arr[:, :, 0] / 255.0) * (-30 - (-80)) + (-80)
 
-            polygons.append(poly)
-            temps.append(tbb[i, j])
+        lat = np.linspace(-10, 10, tbb.shape[0])
+        lon = np.linspace(95, 140, tbb.shape[1])
 
-    df = pd.DataFrame({'temperature': temps, 'geometry': polygons})
-    gdf = gpd.GeoDataFrame(df, geometry='geometry', crs="EPSG:4326")
+        polygons = []
+        temps = []
 
-    return gdf
+        for i in range(len(lat)-1):
+            for j in range(len(lon)-1):
+                poly = Polygon([
+                    (lon[j], lat[i]),
+                    (lon[j], lat[i+1]),
+                    (lon[j+1], lat[i+1]),
+                    (lon[j+1], lat[i])
+                ])
+
+                polygons.append(poly)
+                temps.append(tbb[i, j])
+
+        df = pd.DataFrame({'temperature': temps, 'geometry': polygons})
+        gdf = gpd.GeoDataFrame(df, geometry='geometry', crs="EPSG:4326")
+
+        return gdf
+
+    except Exception as e:
+        st.warning("⚠️ Data real gagal diambil, fallback ke dummy")
+        return load_dummy()
 
 # =========================
 # CLASSIFICATION
@@ -105,21 +119,26 @@ def classify(temp):
         return "AMAN"
 
 # =========================
-# LOAD DATA SESUAI MODE
+# LOAD DATA
 # =========================
 if mode == "Dummy":
     gdf = load_dummy()
 else:
     gdf = load_himawari()
 
+# pastikan kolom ada
+if 'temperature' not in gdf.columns:
+    st.error("❌ Data tidak valid")
+    st.stop()
+
 gdf['status'] = gdf['temperature'].apply(classify)
 
 # =========================
-# STATISTIK DASHBOARD
+# DASHBOARD
 # =========================
 col1, col2, col3 = st.columns(3)
 
-col1.metric("Total Data", len(gdf))
+col1.metric("Total Grid", len(gdf))
 col2.metric("Ekstrem", len(gdf[gdf['status']=="EKSTREM"]))
 col3.metric("Waspada", len(gdf[gdf['status']=="WASPADA"]))
 
@@ -144,7 +163,7 @@ m = folium.Map(location=[0, 102], zoom_start=5)
 folium.GeoJson(
     gdf,
     style_function=lambda x: {
-        'fillColor': get_color(x['properties']['status']),
+        'fillColor': get_color(x['properties'].get('status', 'AMAN')),
         'color': 'black',
         'weight': 0.5,
         'fillOpacity': 0.6
@@ -171,4 +190,4 @@ st.markdown("""
 # FOOTER
 # =========================
 st.markdown("---")
-st.caption("📡 Data: Himawari-8 (BMKG) | Mode Real = dari citra satelit")
+st.caption("📡 Data: Himawari-8 | Mode real berbasis citra BMKG (fallback otomatis)")
