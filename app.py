@@ -1,193 +1,123 @@
 import streamlit as st
 import numpy as np
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
+import requests
+import cv2
+from PIL import Image
+import matplotlib.pyplot as plt
 
 # =========================
 # ⚙️ CONFIG
 # =========================
-st.set_page_config(page_title="EWS Meteorologi Explainable", layout="wide")
+st.set_page_config(page_title="Himawari IR EWS", layout="wide")
 
-st.title("🌦️ Early Warning System Meteorologi (Explainable AI Version)")
-st.caption("Sistem berbasis indeks atmosfer + penjelasan threshold agar mudah dipahami")
+st.title("🛰️ Himawari IR Real Decoder - Early Warning System")
+st.caption("Menggunakan citra IR Enhanced BMKG untuk estimasi potensi cuaca ekstrem")
 
 # =========================
-# 🧪 SIMULASI DATA (STABIL & REALISTIS)
+# 🌐 AMBIL GAMBAR BMKG
 # =========================
 @st.cache_data
-def generate_data(n=60):
-    np.random.seed(7)
+def load_image():
+    # BMKG IR Enhanced (latest image endpoint biasanya berubah-ubah)
+    url = "https://inderaja.bmkg.go.id/IMAGE/HIMA/H08_IR/INA/thumbnail_AHI88_IR1.png"
 
-    df = pd.DataFrame({
-        "lat": np.random.uniform(-11, 6, n),
-        "lon": np.random.uniform(95, 141, n),
+    response = requests.get(url, timeout=10)
+    img = Image.open(BytesIO(response.content)).convert("L")
+    return np.array(img)
 
-        # atmosfer realistis
-        "cape": np.random.uniform(100, 4000, n),  # J/kg
-        "cloud_top_temp": np.random.uniform(-90, 20, n),  # °C
-        "humidity": np.random.uniform(30, 100, n),  # %
-        "rain_rate": np.random.uniform(0, 100, n)  # mm/h
-    })
+# fallback safer method
+def load_image_safe():
+    url = "https://inderaja.bmkg.go.id/IMAGE/HIMA/H08_IR/INA/thumbnail_AHI88_IR1.png"
+    try:
+        response = requests.get(url, timeout=10)
+        img = Image.open(BytesIO(response.content)).convert("L")
+        return np.array(img), None
+    except Exception as e:
+        return None, str(e)
 
-    return df
+from io import BytesIO
 
-df = generate_data()
+img, error = load_image_safe()
 
-# =========================
-# 🧮 NORMALISASI AMAN
-# =========================
-def norm(x, min_v, max_v):
-    return np.clip((x - min_v) / (max_v - min_v), 0, 1)
-
-# =========================
-# ⚡ METEOROLOGICAL INDEX
-# =========================
-def compute_score(row):
-    cape_n = norm(row["cape"], 0, 4000)
-    ctt_n = norm(abs(row["cloud_top_temp"]), 0, 90)
-    hum_n = norm(row["humidity"], 0, 100)
-    rain_n = norm(row["rain_rate"], 0, 100)
-
-    score = (0.4 * cape_n) + (0.3 * ctt_n) + (0.2 * hum_n) + (0.1 * rain_n)
-    return score
-
-df["score"] = df.apply(compute_score, axis=1)
+if error:
+    st.error("Gagal mengambil data BMKG. Menggunakan fallback demo image.")
+    img = np.random.randint(0, 255, (500, 500))
 
 # =========================
-# 🚨 THRESHOLD CLASSIFICATION
+# 🌡️ KONVERSI PROXY SUHU
 # =========================
-def classify(score):
-    if score < 0.30:
+def pixel_to_ctt(pixel):
+    # IR grayscale → proxy temperature
+    return -90 + (pixel / 255) * 100  # approx -90 to +10°C
+
+ctt = pixel_to_ctt(img)
+
+# =========================
+# ⚡ DETEKSI KONVEKTIF
+# =========================
+def ews_index(ctt_value):
+    # semakin dingin → semakin berbahaya
+    if ctt_value < -70:
+        return 0.9
+    elif ctt_value < -60:
+        return 0.75
+    elif ctt_value < -40:
+        return 0.55
+    elif ctt_value < -20:
+        return 0.30
+    else:
+        return 0.10
+
+index = np.mean(ews_index(ctt))
+
+# =========================
+# 🚨 CLASSIFICATION
+# =========================
+def classify(i):
+    if i < 0.3:
         return "🟢 Aman"
-    elif score < 0.60:
+    elif i < 0.6:
         return "🟡 Waspada"
-    elif score < 0.80:
+    elif i < 0.8:
         return "🟠 Siaga"
     else:
         return "🔴 Ekstrem"
 
-df["status"] = df["score"].apply(classify)
+status = classify(index)
 
 # =========================
-# 🧠 EXPLANATION ENGINE (INTI EDUKASI)
+# 🗺️ DISPLAY
 # =========================
-def explain(row):
-    alasan = []
+col1, col2 = st.columns(2)
 
-    if row["cape"] > 2000:
-        alasan.append("CAPE tinggi → atmosfer sangat labil (potensi badai)")
-    elif row["cape"] > 1000:
-        alasan.append("CAPE sedang → mulai ada potensi konveksi")
+with col1:
+    st.subheader("🛰️ Citra IR BMKG")
+    st.image(img, use_container_width=True)
 
-    if row["cloud_top_temp"] < -60:
-        alasan.append("Awan sangat tinggi (Cumulonimbus kuat)")
-    elif row["cloud_top_temp"] < -40:
-        alasan.append("Awan konvektif berkembang")
+with col2:
+    st.subheader("🌡️ Analisis Atmosfer")
+    st.metric("EWS Index", f"{index:.2f}")
+    st.metric("Status", status)
 
-    if row["humidity"] > 80:
-        alasan.append("Kelembapan tinggi → mendukung pembentukan awan hujan")
-
-    if row["rain_rate"] > 40:
-        alasan.append("Hujan intensitas tinggi terdeteksi")
-
-    return alasan
-
-# =========================
-# 📊 SIDEBAR THRESHOLD EXPLANATION
-# =========================
-st.sidebar.header("📘 Penjelasan Threshold")
-
-st.sidebar.markdown("""
-### 🟢 Aman (0.00 – 0.30)
-- Atmosfer stabil
-- Hampir tidak ada awan konvektif
-
-### 🟡 Waspada (0.30 – 0.60)
-- Awal pembentukan awan hujan
-- Hujan lokal mungkin terjadi
-
-### 🟠 Siaga (0.60 – 0.80)
-- Atmosfer labil
-- Potensi hujan lebat & petir
-
-### 🔴 Ekstrem (0.80 – 1.00)
-- Awan Cumulonimbus aktif
-- Hujan lebat & angin kencang
-""")
+    st.write("### 📘 Interpretasi")
+    if status == "🟢 Aman":
+        st.write("Atmosfer stabil, tidak ada indikasi awan konvektif signifikan.")
+    elif status == "🟡 Waspada":
+        st.write("Mulai terbentuk awan hujan lokal.")
+    elif status == "🟠 Siaga":
+        st.write("Awan konvektif kuat, potensi hujan lebat.")
+    else:
+        st.write("⚠️ Cumulonimbus aktif, potensi hujan ekstrem & angin kencang.")
 
 # =========================
-# 🔍 FILTER
+# 📊 HISTOGRAM SUHU AWAN
 # =========================
-status_filter = st.sidebar.multiselect(
-    "Filter Status",
-    ["🟢 Aman", "🟡 Waspada", "🟠 Siaga", "🔴 Ekstrem"],
-    default=["🟢 Aman", "🟡 Waspada", "🟠 Siaga", "🔴 Ekstrem"]
-)
+st.subheader("📊 Distribusi Estimasi Suhu Puncak Awan")
 
-filtered = df[df["status"].isin(status_filter)]
+fig, ax = plt.subplots()
+ax.hist(ctt.flatten(), bins=30)
+ax.set_title("Cloud Top Temperature Proxy")
+ax.set_xlabel("°C")
+ax.set_ylabel("Pixel Count")
 
-# =========================
-# 📊 METRIC DASHBOARD
-# =========================
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric("Total Area", len(df))
-col2.metric("Ekstrem", len(df[df["status"] == "🔴 Ekstrem"]))
-col3.metric("Siaga", len(df[df["status"] == "🟠 Siaga"]))
-col4.metric("Aman", len(df[df["status"] == "🟢 Aman"]))
-
-# =========================
-# 🗺️ MAP
-# =========================
-st.subheader("🗺️ Peta Risiko Cuaca")
-
-m = folium.Map(location=[-2, 118], zoom_start=5)
-
-for _, r in filtered.iterrows():
-    color = {
-        "🟢 Aman": "green",
-        "🟡 Waspada": "orange",
-        "🟠 Siaga": "darkorange",
-        "🔴 Ekstrem": "red"
-    }[r["status"]]
-
-    explanation = explain(r)
-
-    folium.CircleMarker(
-        location=[r["lat"], r["lon"]],
-        radius=6,
-        color=color,
-        fill=True,
-        fill_opacity=0.7,
-        popup=folium.Popup(
-            f"""
-            <b>Status:</b> {r['status']}<br>
-            <b>Score:</b> {r['score']:.2f}<br><br>
-
-            <b>Parameter:</b><br>
-            CAPE: {r['cape']:.0f} J/kg<br>
-            CTT: {r['cloud_top_temp']:.1f} °C<br>
-            RH: {r['humidity']:.0f}%<br>
-            Rain: {r['rain_rate']:.1f} mm/h<br><br>
-
-            <b>Kenapa?</b><br>
-            {"<br>".join(explanation)}
-            """,
-            max_width=300
-        )
-    ).add_to(m)
-
-st_folium(m, width=1200, height=520)
-
-# =========================
-# 📊 DETAIL TABLE
-# =========================
-st.subheader("📍 Data Detail (Explainable Output)")
-
-filtered["explanation"] = filtered.apply(explain, axis=1)
-
-st.dataframe(
-    filtered.sort_values("score", ascending=False),
-    use_container_width=True
-)
+st.pyplot(fig)
