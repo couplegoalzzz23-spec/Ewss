@@ -2,3 +2,5 @@ streamlit
 geopandas
 folium
 streamlit-folium
+shapely
+pyogrio
