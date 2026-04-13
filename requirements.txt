@@ -4,3 +4,5 @@ folium
 streamlit-folium
 shapely
 pyogrio
+pillow
+requests
