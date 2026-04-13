@@ -1,92 +1,92 @@
 import streamlit as st
 import numpy as np
 import requests
-import cv2
 from PIL import Image
+from io import BytesIO
 import matplotlib.pyplot as plt
 
 # =========================
 # ⚙️ CONFIG
 # =========================
-st.set_page_config(page_title="Himawari IR EWS", layout="wide")
+st.set_page_config(page_title="Cb Detection IR Himawari", layout="wide")
 
-st.title("🛰️ Himawari IR Real Decoder - Early Warning System")
-st.caption("Menggunakan citra IR Enhanced BMKG untuk estimasi potensi cuaca ekstrem")
+st.title("🌩️ Automatic Cumulonimbus Detection (Himawari IR)")
+st.caption("Prototype berbasis citra satelit IR BMKG - pixel-based convective detection")
 
 # =========================
-# 🌐 AMBIL GAMBAR BMKG
+# 🛰️ LOAD IMAGE BMKG IR
 # =========================
 @st.cache_data
-def load_image():
-    # BMKG IR Enhanced (latest image endpoint biasanya berubah-ubah)
+def load_ir():
     url = "https://inderaja.bmkg.go.id/IMAGE/HIMA/H08_IR/INA/thumbnail_AHI88_IR1.png"
-
-    response = requests.get(url, timeout=10)
-    img = Image.open(BytesIO(response.content)).convert("L")
-    return np.array(img)
-
-# fallback safer method
-def load_image_safe():
-    url = "https://inderaja.bmkg.go.id/IMAGE/HIMA/H08_IR/INA/thumbnail_AHI88_IR1.png"
+    
     try:
-        response = requests.get(url, timeout=10)
-        img = Image.open(BytesIO(response.content)).convert("L")
+        r = requests.get(url, timeout=10)
+        img = Image.open(BytesIO(r.content)).convert("L")
         return np.array(img), None
     except Exception as e:
         return None, str(e)
 
-from io import BytesIO
+img, error = load_ir()
 
-img, error = load_image_safe()
-
-if error:
-    st.error("Gagal mengambil data BMKG. Menggunakan fallback demo image.")
+# fallback kalau gagal
+if error or img is None:
+    st.warning("⚠️ Gagal ambil data BMKG, menggunakan data simulasi.")
     img = np.random.randint(0, 255, (500, 500))
 
 # =========================
-# 🌡️ KONVERSI PROXY SUHU
+# 🌡️ PIXEL → TEMPERATURE PROXY
 # =========================
-def pixel_to_ctt(pixel):
-    # IR grayscale → proxy temperature
-    return -90 + (pixel / 255) * 100  # approx -90 to +10°C
+def pixel_to_temp(pixel):
+    # proxy IR brightness → suhu (approximation)
+    return -90 + (pixel / 255) * 100
 
-ctt = pixel_to_ctt(img)
+ctt = pixel_to_temp(img)
 
 # =========================
-# ⚡ DETEKSI KONVEKTIF
+# 🌩️ CB DETECTION ENGINE
 # =========================
-def ews_index(ctt_value):
-    # semakin dingin → semakin berbahaya
-    if ctt_value < -70:
-        return 0.9
-    elif ctt_value < -60:
-        return 0.75
-    elif ctt_value < -40:
-        return 0.55
-    elif ctt_value < -20:
-        return 0.30
+def detect_cb(ctt_array):
+
+    # cold cloud threshold (Cb candidate)
+    cb_mask = ctt_array < -70
+
+    # coverage (% area)
+    coverage = np.sum(cb_mask) / cb_mask.size
+
+    # intensity (rata-rata suhu awan dingin)
+    if np.any(cb_mask):
+        intensity = np.mean(ctt_array[cb_mask])
     else:
-        return 0.10
+        intensity = -999
 
-index = np.mean(ews_index(ctt))
+    # scoring system
+    score = (coverage * 0.7)
+
+    if intensity != -999:
+        score += (abs(intensity + 70) / 70) * 0.3
+
+    return cb_mask, coverage, intensity, score
+
+cb_mask, coverage, intensity, score = detect_cb(ctt)
 
 # =========================
 # 🚨 CLASSIFICATION
 # =========================
-def classify(i):
-    if i < 0.3:
-        return "🟢 Aman"
-    elif i < 0.6:
-        return "🟡 Waspada"
-    elif i < 0.8:
-        return "🟠 Siaga"
+def classify(score):
+    if score < 0.2:
+        return "🟢 Tidak signifikan"
+    elif score < 0.4:
+        return "🟡 CB mulai berkembang"
+    elif score < 0.6:
+        return "🟠 CB aktif (hujan lebat)"
     else:
-        return "🔴 Ekstrem"
+        return "🔴 CB sangat aktif (cuaca ekstrem)"
 
-status = classify(index)
+status = classify(score)
 
 # =========================
-# 🗺️ DISPLAY
+# 📊 DASHBOARD
 # =========================
 col1, col2 = st.columns(2)
 
@@ -94,30 +94,51 @@ with col1:
     st.subheader("🛰️ Citra IR BMKG")
     st.image(img, use_container_width=True)
 
+    st.subheader("🌩️ Deteksi CB (mask)")
+    st.image(cb_mask.astype(np.uint8) * 255, use_container_width=True)
+
 with col2:
-    st.subheader("🌡️ Analisis Atmosfer")
-    st.metric("EWS Index", f"{index:.2f}")
+    st.subheader("📊 Hasil Analisis")
+
+    st.metric("CB Coverage", f"{coverage*100:.2f}%")
+    st.metric("CB Score", f"{score:.2f}")
     st.metric("Status", status)
 
-    st.write("### 📘 Interpretasi")
-    if status == "🟢 Aman":
-        st.write("Atmosfer stabil, tidak ada indikasi awan konvektif signifikan.")
-    elif status == "🟡 Waspada":
-        st.write("Mulai terbentuk awan hujan lokal.")
-    elif status == "🟠 Siaga":
-        st.write("Awan konvektif kuat, potensi hujan lebat.")
+    if intensity == -999:
+        st.warning("Tidak ada area CB terdeteksi")
     else:
-        st.write("⚠️ Cumulonimbus aktif, potensi hujan ekstrem & angin kencang.")
+        st.metric("CB Intensity (proxy °C)", f"{intensity:.2f}")
+
+    st.write("### 🧠 Interpretasi")
+    st.write("""
+    Sistem ini mendeteksi Cumulonimbus berdasarkan:
+    - Suhu puncak awan sangat dingin (< -70°C)
+    - Luas area awan dingin (coverage)
+    
+    Semakin besar coverage + semakin dingin awan → semakin tinggi potensi badai.
+    """)
 
 # =========================
-# 📊 HISTOGRAM SUHU AWAN
+# 📊 HISTOGRAM SUHU
 # =========================
-st.subheader("📊 Distribusi Estimasi Suhu Puncak Awan")
+st.subheader("📊 Distribusi Suhu Awan (Proxy CTT)")
 
 fig, ax = plt.subplots()
 ax.hist(ctt.flatten(), bins=30)
-ax.set_title("Cloud Top Temperature Proxy")
-ax.set_xlabel("°C")
-ax.set_ylabel("Pixel Count")
+ax.set_xlabel("Temperature (°C)")
+ax.set_ylabel("Pixel count")
+ax.set_title("Cloud Top Temperature Distribution")
 
 st.pyplot(fig)
+
+# =========================
+# 🔍 DETAIL NUMERIK
+# =========================
+st.subheader("📍 Statistik Tambahan")
+
+st.write({
+    "mean_temp": float(np.mean(ctt)),
+    "min_temp": float(np.min(ctt)),
+    "max_temp": float(np.max(ctt)),
+    "cb_pixel_count": int(np.sum(cb_mask))
+})
