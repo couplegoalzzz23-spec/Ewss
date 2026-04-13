@@ -2,6 +2,8 @@ import streamlit as st
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
+import numpy as np
+import pandas as pd
 import os
 import json
 
@@ -11,53 +13,118 @@ import json
 st.set_page_config(page_title="EWS Himawari", layout="wide")
 
 st.title("🌩️ Early Warning System - Himawari")
+st.markdown("Sistem deteksi dini cuaca ekstrem berbasis suhu awan (TBB)")
 
 # =========================
-# LOAD / HANDLE FILE
+# PILIH MODE
 # =========================
-file_path = "riau_warning.geojson"
+mode = st.radio("📡 Pilih Sumber Data:", ["Dummy", "Himawari Real"])
 
-# kalau file tidak ada → buat dummy
-if not os.path.exists(file_path):
-    dummy = {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [[[100, -1], [104, -1], [104, 1], [100, 1], [100, -1]]]
-                },
-                "properties": {
-                    "KECAMATAN": "Riau Dummy",
-                    "temperature": -75,
-                    "status": "EKSTREM"
+# =========================
+# LOAD DUMMY
+# =========================
+def load_dummy():
+    file_path = "riau_warning.geojson"
+
+    if not os.path.exists(file_path):
+        dummy = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[100, -1], [104, -1], [104, 1], [100, 1], [100, -1]]]
+                    },
+                    "properties": {
+                        "KECAMATAN": "Riau Dummy",
+                        "temperature": -75,
+                        "status": "EKSTREM"
+                    }
                 }
-            }
-        ]
-    }
+            ]
+        }
 
-    with open(file_path, "w") as f:
-        json.dump(dummy, f)
+        with open(file_path, "w") as f:
+            json.dump(dummy, f)
 
-# =========================
-# READ DATA
-# =========================
-try:
-    gdf = gpd.read_file(file_path)
-except Exception as e:
-    st.error("❌ Gagal membaca GeoJSON")
-    st.write(e)
-    st.stop()
+    return gpd.read_file(file_path)
 
 # =========================
-# INFO DATA
+# LOAD HIMAWARI REAL
 # =========================
-st.subheader("📊 Informasi Data")
-st.write("Jumlah wilayah:", len(gdf))
+def load_himawari():
+    import requests
+    from PIL import Image
+    import io
+    from shapely.geometry import Polygon
+
+    url = "https://www.bmkg.go.id/asset/img/satelit/himawari-ir-enhanced.jpg"
+
+    response = requests.get(url)
+    img = Image.open(io.BytesIO(response.content))
+
+    img = img.resize((100, 100))
+    arr = np.array(img)
+
+    # konversi ke suhu (approx)
+    tbb = (arr[:, :, 0] / 255.0) * (-30 - (-80)) + (-80)
+
+    lat = np.linspace(-10, 10, tbb.shape[0])
+    lon = np.linspace(95, 140, tbb.shape[1])
+
+    polygons = []
+    temps = []
+
+    for i in range(len(lat)-1):
+        for j in range(len(lon)-1):
+            poly = Polygon([
+                (lon[j], lat[i]),
+                (lon[j], lat[i+1]),
+                (lon[j+1], lat[i+1]),
+                (lon[j+1], lat[i])
+            ])
+
+            polygons.append(poly)
+            temps.append(tbb[i, j])
+
+    df = pd.DataFrame({'temperature': temps, 'geometry': polygons})
+    gdf = gpd.GeoDataFrame(df, geometry='geometry', crs="EPSG:4326")
+
+    return gdf
 
 # =========================
-# FUNGSI WARNA
+# CLASSIFICATION
+# =========================
+def classify(temp):
+    if temp <= -70:
+        return "EKSTREM"
+    elif temp <= -60:
+        return "WASPADA"
+    else:
+        return "AMAN"
+
+# =========================
+# LOAD DATA SESUAI MODE
+# =========================
+if mode == "Dummy":
+    gdf = load_dummy()
+else:
+    gdf = load_himawari()
+
+gdf['status'] = gdf['temperature'].apply(classify)
+
+# =========================
+# STATISTIK DASHBOARD
+# =========================
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Total Data", len(gdf))
+col2.metric("Ekstrem", len(gdf[gdf['status']=="EKSTREM"]))
+col3.metric("Waspada", len(gdf[gdf['status']=="WASPADA"]))
+
+# =========================
+# WARNA
 # =========================
 def get_color(status):
     if status == "EKSTREM":
@@ -68,29 +135,26 @@ def get_color(status):
         return "green"
 
 # =========================
-# BUAT PETA
+# PETA
 # =========================
 st.subheader("🗺️ Peta Early Warning")
 
-m = folium.Map(location=[0, 102], zoom_start=6)
+m = folium.Map(location=[0, 102], zoom_start=5)
 
 folium.GeoJson(
     gdf,
     style_function=lambda x: {
-        'fillColor': get_color(x['properties'].get('status', 'AMAN')),
+        'fillColor': get_color(x['properties']['status']),
         'color': 'black',
-        'weight': 1,
+        'weight': 0.5,
         'fillOpacity': 0.6
     },
     tooltip=folium.GeoJsonTooltip(
-        fields=['KECAMATAN', 'temperature', 'status'],
-        aliases=['Kecamatan:', 'Suhu (°C):', 'Status:']
+        fields=['temperature', 'status'],
+        aliases=['Suhu (°C):', 'Status:']
     )
 ).add_to(m)
 
-# =========================
-# TAMPILKAN PETA (FIX)
-# =========================
 st_folium(m, width=1000, height=600)
 
 # =========================
@@ -107,4 +171,4 @@ st.markdown("""
 # FOOTER
 # =========================
 st.markdown("---")
-st.caption("📡 Data: Himawari (Simulasi / Dummy)")
+st.caption("📡 Data: Himawari-8 (BMKG) | Mode Real = dari citra satelit")
