@@ -1,193 +1,139 @@
 import streamlit as st
-import geopandas as gpd
-import folium
-from streamlit_folium import st_folium
 import numpy as np
 import pandas as pd
-import os
-import json
+import folium
+from streamlit_folium import st_folium
 
 # =========================
-# CONFIG
+# 🌦️ CONFIG APP
 # =========================
-st.set_page_config(page_title="EWS Himawari", layout="wide")
+st.set_page_config(page_title="EWS Meteorologi Pro", layout="wide")
 
-st.title("🌩️ Early Warning System - Himawari")
-st.markdown("Deteksi dini cuaca ekstrem berbasis suhu awan (TBB)")
-
-# =========================
-# PILIH MODE
-# =========================
-mode = st.radio("📡 Pilih Sumber Data:", ["Dummy", "Himawari Real"])
+st.title("🌦️ Early Warning System Meteorologi (Pro Version)")
+st.caption("Sistem berbasis indeks atmosfer: CAPE, Cloud Top Temperature, Humidity, Rain Rate")
 
 # =========================
-# DUMMY DATA (AMAN)
+# 🧠 SIMULASI DATA ATMOSFER
 # =========================
-def load_dummy():
-    file_path = "riau_warning.geojson"
+def generate_data(n=50):
+    np.random.seed(42)
+    
+    data = pd.DataFrame({
+        "lat": np.random.uniform(-11, 6, n),   # Indonesia region
+        "lon": np.random.uniform(95, 141, n),
+        "cape": np.random.uniform(200, 3500, n),  # J/kg
+        "cloud_top_temp": np.random.uniform(-90, 10, n),  # °C
+        "humidity": np.random.uniform(30, 100, n),  # %
+        "rain_rate": np.random.uniform(0, 80, n)  # mm/h
+    })
+    return data
 
-    if not os.path.exists(file_path):
-        dummy = {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [[[100, -1], [104, -1], [104, 1], [100, 1], [100, -1]]]
-                    },
-                    "properties": {
-                        "KECAMATAN": "Riau Dummy",
-                        "temperature": -75,
-                        "status": "EKSTREM"
-                    }
-                }
-            ]
-        }
-        with open(file_path, "w") as f:
-            json.dump(dummy, f)
-
-    return gpd.read_file(file_path)
+df = generate_data()
 
 # =========================
-# HIMAWARI REAL (ANTI ERROR)
+# 🧮 NORMALISASI INDEX
 # =========================
-def load_himawari():
-    import requests
-    from PIL import Image
-    import io
-    from shapely.geometry import Polygon
-
-    try:
-        url = "https://www.bmkg.go.id/asset/img/satelit/himawari-ir-enhanced.jpg"
-
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-
-        # validasi response
-        if response.status_code != 200:
-            raise Exception("Status bukan 200")
-
-        if "image" not in response.headers.get("Content-Type", ""):
-            raise Exception("Bukan gambar")
-
-        img = Image.open(io.BytesIO(response.content))
-
-        # resize biar ringan
-        img = img.resize((100, 100))
-        arr = np.array(img)
-
-        # konversi ke suhu (approx)
-        tbb = (arr[:, :, 0] / 255.0) * (-30 - (-80)) + (-80)
-
-        lat = np.linspace(-10, 10, tbb.shape[0])
-        lon = np.linspace(95, 140, tbb.shape[1])
-
-        polygons = []
-        temps = []
-
-        for i in range(len(lat)-1):
-            for j in range(len(lon)-1):
-                poly = Polygon([
-                    (lon[j], lat[i]),
-                    (lon[j], lat[i+1]),
-                    (lon[j+1], lat[i+1]),
-                    (lon[j+1], lat[i])
-                ])
-
-                polygons.append(poly)
-                temps.append(tbb[i, j])
-
-        df = pd.DataFrame({'temperature': temps, 'geometry': polygons})
-        gdf = gpd.GeoDataFrame(df, geometry='geometry', crs="EPSG:4326")
-
-        return gdf
-
-    except Exception as e:
-        st.warning("⚠️ Data real gagal diambil, fallback ke dummy")
-        return load_dummy()
+def normalize(x, min_val, max_val):
+    return (x - min_val) / (max_val - min_val)
 
 # =========================
-# CLASSIFICATION
+# ⚡ METEOROLOGICAL INDEX
 # =========================
-def classify(temp):
-    if temp <= -70:
-        return "EKSTREM"
-    elif temp <= -60:
-        return "WASPADA"
-    else:
-        return "AMAN"
+def compute_index(row):
+    cape_n = normalize(row["cape"], 0, 4000)
+    ctt_n = normalize(abs(row["cloud_top_temp"]), 0, 100)
+    hum_n = normalize(row["humidity"], 0, 100)
+    rain_n = normalize(row["rain_rate"], 0, 100)
 
-# =========================
-# LOAD DATA
-# =========================
-if mode == "Dummy":
-    gdf = load_dummy()
-else:
-    gdf = load_himawari()
-
-# pastikan kolom ada
-if 'temperature' not in gdf.columns:
-    st.error("❌ Data tidak valid")
-    st.stop()
-
-gdf['status'] = gdf['temperature'].apply(classify)
-
-# =========================
-# DASHBOARD
-# =========================
-col1, col2, col3 = st.columns(3)
-
-col1.metric("Total Grid", len(gdf))
-col2.metric("Ekstrem", len(gdf[gdf['status']=="EKSTREM"]))
-col3.metric("Waspada", len(gdf[gdf['status']=="WASPADA"]))
-
-# =========================
-# WARNA
-# =========================
-def get_color(status):
-    if status == "EKSTREM":
-        return "red"
-    elif status == "WASPADA":
-        return "orange"
-    else:
-        return "green"
-
-# =========================
-# PETA
-# =========================
-st.subheader("🗺️ Peta Early Warning")
-
-m = folium.Map(location=[0, 102], zoom_start=5)
-
-folium.GeoJson(
-    gdf,
-    style_function=lambda x: {
-        'fillColor': get_color(x['properties'].get('status', 'AMAN')),
-        'color': 'black',
-        'weight': 0.5,
-        'fillOpacity': 0.6
-    },
-    tooltip=folium.GeoJsonTooltip(
-        fields=['temperature', 'status'],
-        aliases=['Suhu (°C):', 'Status:']
+    score = (
+        0.4 * cape_n +
+        0.3 * ctt_n +
+        0.2 * hum_n +
+        0.1 * rain_n
     )
-).add_to(m)
 
-st_folium(m, width=1000, height=600)
+    return score
 
-# =========================
-# LEGEND
-# =========================
-st.markdown("""
-### Keterangan:
-- 🔴 EKSTREM (≤ -70°C)
-- 🟠 WASPADA (≤ -60°C)
-- 🟢 AMAN (> -60°C)
-""")
+df["score"] = df.apply(compute_index, axis=1)
 
 # =========================
-# FOOTER
+# 🚨 KLASIFIKASI RISIKO
 # =========================
-st.markdown("---")
-st.caption("📡 Data: Himawari-8 | Mode real berbasis citra BMKG (fallback otomatis)")
+def classify(score):
+    if score < 0.3:
+        return "🟢 Aman"
+    elif score < 0.6:
+        return "🟡 Waspada"
+    elif score < 0.8:
+        return "🟠 Siaga"
+    else:
+        return "🔴 Ekstrem"
+
+df["status"] = df["score"].apply(classify)
+
+# =========================
+# 📊 SIDEBAR FILTER
+# =========================
+st.sidebar.header("⚙️ Filter Area")
+
+status_filter = st.sidebar.multiselect(
+    "Pilih Status",
+    ["🟢 Aman", "🟡 Waspada", "🟠 Siaga", "🔴 Ekstrem"],
+    default=["🟢 Aman", "🟡 Waspada", "🟠 Siaga", "🔴 Ekstrem"]
+)
+
+filtered_df = df[df["status"].isin(status_filter)]
+
+# =========================
+# 🗺️ PETA INTERAKTIF
+# =========================
+st.subheader("🗺️ Peta Risiko Cuaca")
+
+m = folium.Map(location=[-2, 118], zoom_start=5)
+
+for _, row in filtered_df.iterrows():
+    color = {
+        "🟢 Aman": "green",
+        "🟡 Waspada": "orange",
+        "🟠 Siaga": "darkorange",
+        "🔴 Ekstrem": "red"
+    }[row["status"]]
+
+    folium.CircleMarker(
+        location=[row["lat"], row["lon"]],
+        radius=6,
+        color=color,
+        fill=True,
+        fill_opacity=0.7,
+        popup=f"""
+        Status: {row['status']}<br>
+        Score: {row['score']:.2f}<br>
+        CAPE: {row['cape']:.0f} J/kg<br>
+        CTT: {row['cloud_top_temp']:.1f} °C<br>
+        RH: {row['humidity']:.0f}%<br>
+        Rain: {row['rain_rate']:.1f} mm/h
+        """
+    ).add_to(m)
+
+st_data = st_folium(m, width=1200, height=500)
+
+# =========================
+# 📊 DASHBOARD STATISTIK
+# =========================
+st.subheader("📊 Statistik Kondisi Atmosfer")
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Total Area", len(df))
+col2.metric("Ekstrem", len(df[df["status"] == "🔴 Ekstrem"]))
+col3.metric("Siaga", len(df[df["status"] == "🟠 Siaga"]))
+col4.metric("Aman", len(df[df["status"] == "🟢 Aman"]))
+
+st.bar_chart(df["status"].value_counts())
+
+# =========================
+# 🧠 DETAIL ANALISIS
+# =========================
+st.subheader("📍 Data Detail")
+
+st.dataframe(filtered_df.sort_values("score", ascending=False))
