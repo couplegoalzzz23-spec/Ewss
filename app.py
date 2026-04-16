@@ -2,46 +2,98 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import folium
+import xarray as xr
 from streamlit_folium import st_folium
 
 # =========================
 # ⚙️ CONFIG
 # =========================
-st.set_page_config(page_title="EWS Meteorologi Explainable", layout="wide")
+st.set_page_config(page_title="SkyAlert - EWS", layout="wide")
 
-st.title("🌦️ Early Warning System Meteorologi (Explainable AI Version)")
-st.caption("Sistem berbasis indeks atmosfer + penjelasan threshold agar mudah dipahami")
+st.title("🌩️ SkyAlert – Early Warning System")
+st.caption("Satellite-Based Explainable Meteorological EWS | Resti Maulina C.C")
 
 # =========================
-# 🧪 SIMULASI DATA (STABIL & REALISTIS)
+# 📦 LOAD NETCDF (ROBUST)
 # =========================
 @st.cache_data
-def generate_data(n=60):
-    np.random.seed(7)
+def load_nc(file_path):
+    try:
+        ds = xr.open_dataset(file_path)
 
-    df = pd.DataFrame({
-        "lat": np.random.uniform(-11, 6, n),
-        "lon": np.random.uniform(95, 141, n),
+        # ambil variabel pertama (aman untuk berbagai file)
+        var_name = list(ds.data_vars)[0]
+        data = ds[var_name]
 
-        # atmosfer realistis
-        "cape": np.random.uniform(100, 4000, n),  # J/kg
-        "cloud_top_temp": np.random.uniform(-90, 20, n),  # °C
-        "humidity": np.random.uniform(30, 100, n),  # %
-        "rain_rate": np.random.uniform(0, 100, n)  # mm/h
-    })
+        # handle dimensi waktu
+        if "time" in data.dims:
+            data = data.isel(time=0)
 
-    return df
+        # cari nama koordinat fleksibel
+        lat_name = [c for c in ds.coords if "lat" in c.lower()][0]
+        lon_name = [c for c in ds.coords if "lon" in c.lower()][0]
 
-df = generate_data()
+        lat = ds[lat_name].values
+        lon = ds[lon_name].values
+
+        # convert ke numpy
+        tbb = data.values
+
+        # konversi Kelvin → Celsius
+        if np.nanmean(tbb) > 200:
+            tbb = tbb - 273.15
+
+        # grid
+        lat_grid, lon_grid = np.meshgrid(lat, lon, indexing='ij')
+
+        df = pd.DataFrame({
+            "lat": lat_grid.flatten(),
+            "lon": lon_grid.flatten(),
+            "cloud_top_temp": tbb.flatten()
+        })
+
+        df = df.dropna()
+
+        # sampling agar ringan
+        if len(df) > 3000:
+            df = df.sample(3000, random_state=42)
+
+        return df
+
+    except Exception as e:
+        st.error(f"❌ Gagal load NetCDF: {e}")
+        return None
+
 
 # =========================
-# 🧮 NORMALISASI AMAN
+# LOAD DATA
+# =========================
+file_path = "H09_B07_Indonesia_202604140020.nc"
+
+df = load_nc(file_path)
+
+if df is None:
+    st.stop()
+
+# =========================
+# 🔁 TURUNAN PARAMETER (SAFE MODEL)
+# =========================
+def derive_parameters(df):
+    df["cape"] = np.interp(df["cloud_top_temp"], [-80, 20], [3000, 100])
+    df["humidity"] = np.interp(df["cloud_top_temp"], [-80, 20], [90, 40])
+    df["rain_rate"] = np.interp(df["cloud_top_temp"], [-80, 20], [80, 0])
+    return df
+
+df = derive_parameters(df)
+
+# =========================
+# 🧮 NORMALISASI
 # =========================
 def norm(x, min_v, max_v):
     return np.clip((x - min_v) / (max_v - min_v), 0, 1)
 
 # =========================
-# ⚡ METEOROLOGICAL INDEX
+# ⚡ SCORING SYSTEM
 # =========================
 def compute_score(row):
     cape_n = norm(row["cape"], 0, 4000)
@@ -49,13 +101,12 @@ def compute_score(row):
     hum_n = norm(row["humidity"], 0, 100)
     rain_n = norm(row["rain_rate"], 0, 100)
 
-    score = (0.4 * cape_n) + (0.3 * ctt_n) + (0.2 * hum_n) + (0.1 * rain_n)
-    return score
+    return (0.4 * cape_n) + (0.3 * ctt_n) + (0.2 * hum_n) + (0.1 * rain_n)
 
 df["score"] = df.apply(compute_score, axis=1)
 
 # =========================
-# 🚨 THRESHOLD CLASSIFICATION
+# 🚨 CLASSIFICATION
 # =========================
 def classify(score):
     if score < 0.30:
@@ -70,108 +121,91 @@ def classify(score):
 df["status"] = df["score"].apply(classify)
 
 # =========================
-# 🧠 EXPLANATION ENGINE (INTI EDUKASI)
+# 🧠 EXPLANATION ENGINE
 # =========================
 def explain(row):
     alasan = []
 
     if row["cape"] > 2000:
-        alasan.append("CAPE tinggi → atmosfer sangat labil (potensi badai)")
+        alasan.append("CAPE tinggi → atmosfer sangat labil")
     elif row["cape"] > 1000:
-        alasan.append("CAPE sedang → mulai ada potensi konveksi")
+        alasan.append("CAPE sedang → potensi konveksi")
 
     if row["cloud_top_temp"] < -60:
-        alasan.append("Awan sangat tinggi (Cumulonimbus kuat)")
+        alasan.append("Awan sangat tinggi (CB kuat)")
     elif row["cloud_top_temp"] < -40:
         alasan.append("Awan konvektif berkembang")
 
     if row["humidity"] > 80:
-        alasan.append("Kelembapan tinggi → mendukung pembentukan awan hujan")
+        alasan.append("Kelembapan tinggi")
 
     if row["rain_rate"] > 40:
-        alasan.append("Hujan intensitas tinggi terdeteksi")
+        alasan.append("Hujan intensitas tinggi")
 
     return alasan
 
 # =========================
-# 📊 SIDEBAR THRESHOLD EXPLANATION
+# SIDEBAR
 # =========================
-st.sidebar.header("📘 Penjelasan Threshold")
+st.sidebar.header("📘 Threshold")
 
 st.sidebar.markdown("""
-### 🟢 Aman (0.00 – 0.30)
-- Atmosfer stabil
-- Hampir tidak ada awan konvektif
-
-### 🟡 Waspada (0.30 – 0.60)
-- Awal pembentukan awan hujan
-- Hujan lokal mungkin terjadi
-
-### 🟠 Siaga (0.60 – 0.80)
-- Atmosfer labil
-- Potensi hujan lebat & petir
-
-### 🔴 Ekstrem (0.80 – 1.00)
-- Awan Cumulonimbus aktif
-- Hujan lebat & angin kencang
+🟢 Aman: stabil  
+🟡 Waspada: mulai konveksi  
+🟠 Siaga: labil  
+🔴 Ekstrem: badai kuat  
 """)
 
-# =========================
-# 🔍 FILTER
-# =========================
 status_filter = st.sidebar.multiselect(
     "Filter Status",
-    ["🟢 Aman", "🟡 Waspada", "🟠 Siaga", "🔴 Ekstrem"],
-    default=["🟢 Aman", "🟡 Waspada", "🟠 Siaga", "🔴 Ekstrem"]
+    df["status"].unique(),
+    default=list(df["status"].unique())
 )
 
 filtered = df[df["status"].isin(status_filter)]
 
 # =========================
-# 📊 METRIC DASHBOARD
+# METRICS
 # =========================
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("Total Area", len(df))
-col2.metric("Ekstrem", len(df[df["status"] == "🔴 Ekstrem"]))
-col3.metric("Siaga", len(df[df["status"] == "🟠 Siaga"]))
-col4.metric("Aman", len(df[df["status"] == "🟢 Aman"]))
+col1.metric("Total", len(df))
+col2.metric("Ekstrem", (df["status"] == "🔴 Ekstrem").sum())
+col3.metric("Siaga", (df["status"] == "🟠 Siaga").sum())
+col4.metric("Aman", (df["status"] == "🟢 Aman").sum())
 
 # =========================
-# 🗺️ MAP
+# MAP
 # =========================
 st.subheader("🗺️ Peta Risiko Cuaca")
 
 m = folium.Map(location=[-2, 118], zoom_start=5)
 
-for _, r in filtered.iterrows():
-    color = {
-        "🟢 Aman": "green",
-        "🟡 Waspada": "orange",
-        "🟠 Siaga": "darkorange",
-        "🔴 Ekstrem": "red"
-    }[r["status"]]
+color_map = {
+    "🟢 Aman": "green",
+    "🟡 Waspada": "orange",
+    "🟠 Siaga": "darkorange",
+    "🔴 Ekstrem": "red"
+}
 
+for _, r in filtered.iterrows():
     explanation = explain(r)
 
     folium.CircleMarker(
         location=[r["lat"], r["lon"]],
-        radius=6,
-        color=color,
+        radius=5,
+        color=color_map[r["status"]],
         fill=True,
         fill_opacity=0.7,
         popup=folium.Popup(
             f"""
             <b>Status:</b> {r['status']}<br>
             <b>Score:</b> {r['score']:.2f}<br><br>
-
-            <b>Parameter:</b><br>
-            CAPE: {r['cape']:.0f} J/kg<br>
-            CTT: {r['cloud_top_temp']:.1f} °C<br>
+            CAPE: {r['cape']:.0f}<br>
+            CTT: {r['cloud_top_temp']:.1f}°C<br>
             RH: {r['humidity']:.0f}%<br>
             Rain: {r['rain_rate']:.1f} mm/h<br><br>
-
-            <b>Kenapa?</b><br>
+            <b>Kenapa:</b><br>
             {"<br>".join(explanation)}
             """,
             max_width=300
@@ -181,13 +215,10 @@ for _, r in filtered.iterrows():
 st_folium(m, width=1200, height=520)
 
 # =========================
-# 📊 DETAIL TABLE
+# TABLE
 # =========================
-st.subheader("📍 Data Detail (Explainable Output)")
+st.subheader("📊 Data Detail")
 
 filtered["explanation"] = filtered.apply(explain, axis=1)
 
-st.dataframe(
-    filtered.sort_values("score", ascending=False),
-    use_container_width=True
-)
+st.dataframe(filtered.sort_values("score", ascending=False), use_container_width=True)
